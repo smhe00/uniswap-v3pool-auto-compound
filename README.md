@@ -1,6 +1,4 @@
-# uniswap-v3pool-auto-compound
-Universal Auto-Compound Bot for Uniswap V3 (Arbitrum)
-#  自动化 Uniswap V3 资金池复投 
+#  自动化 Uniswap V3 (Arbitrum) 资金池复投 
 
 * * *
 
