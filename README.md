@@ -20,7 +20,28 @@
 3.  **网络拥堵保护 (Gas Throttling)**：实时监测 Arbitrum 的 `baseFee`，若网络拥堵则主动休眠，防止收益全交了过路费。
 4.  **越界保护 (Out-of-Range)**：若当前价格脱离你设定的流动性区间，系统将暂停复投。
 5.  **最小权限授权 (PoLP)**：将代币的授权（Approve）额度严格限制为单次所需的 28 倍。既能节省后续 90%+ 的授权 Gas 费，又将资金的安全敞口降至最低。
+```mermaid
+graph LR
+    %% Colors & Styles
+    classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+    classDef gate fill:#ffe0b2,stroke:#f57c00,stroke-width:2px,color:#000;
+    classDef sim fill:#bbdefb,stroke:#1976d2,stroke-width:2px,color:#000;
+    classDef chain fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#000;
 
+    Start((定时触发)) --> G0{Gas 正常?}:::gate
+    G0 -- 否 --> End((休眠等待))
+    G0 -- 是 --> G1{在区间内?}:::gate
+    
+    G1 -- 否 --> End
+    G1 -- 是 --> Sim[快照模拟收益]:::sim
+    
+    Sim --> G2{收益达标?}:::gate
+    
+    G2 -- 否 --> Rev1[状态回滚]:::sim --> End
+    G2 -- 是 --> Rev2[状态回滚]:::sim --> Broad((发起广播)):::chain
+    
+    Broad --> Col[提取手续费]:::chain --> App[精准授权]:::chain --> Inv[复投添加]:::chain --> Done((完成)):::chain
+```
 * * *
 
 🛠️ 安装与部署指南
@@ -164,7 +185,28 @@ This repository takes a minimalist approach. It contains only the core smart con
 3.  **Gas Throttling**: Monitors network `baseFee`. If Arbitrum is congested, the bot goes to sleep to protect your yields from high gas fees.
 4.  **Out-of-Range Protection**: Halts reinvestment if the current price is outside your LP bounds.
 5.  **Least Privilege Allowance (PoLP)**: Approves exactly 28x of the required token amounts. This minimizes future `approve` gas costs while strictly limiting the blast radius of the smart contract approval.
+```mermaid
+graph LR
+    %% Colors & Styles
+    classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
+    classDef gate fill:#ffe0b2,stroke:#f57c00,stroke-width:2px,color:#000;
+    classDef sim fill:#bbdefb,stroke:#1976d2,stroke-width:2px,color:#000;
+    classDef chain fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#000;
 
+    Start((Cron)) --> G0{Gas OK?}:::gate
+    G0 -- No --> End((Sleep))
+    G0 -- Yes --> G1{In Range?}:::gate
+    
+    G1 -- No --> End
+    G1 -- Yes --> Sim[Snapshot & Simulate]:::sim
+    
+    Sim --> G2{Target Met?}:::gate
+    
+    G2 -- No --> Rev1[Revert State]:::sim --> End
+    G2 -- Yes --> Rev2[Revert State]:::sim --> Broad((Broadcast)):::chain
+    
+    Broad --> Col[Collect]:::chain --> App[Approve]:::chain --> Inv[Reinvest]:::chain --> Done((Done)):::chain
+```
 * * *
 
 🛠️ Installation & Setup Guide
