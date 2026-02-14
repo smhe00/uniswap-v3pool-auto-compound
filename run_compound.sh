@@ -4,6 +4,9 @@
 # Universal Auto-Compound Bot Execution Pipeline
 # ========================================================
 
+# 0. 动态注入环境变量 (适配用户的 Cron 裸环境)
+export PATH="$PATH:$HOME/.foundry/bin"
+
 # 1. 设定严格的工作目录
 WORK_DIR="/home/xxxxxx/uniswap-bot"
 cd $WORK_DIR || exit 1
