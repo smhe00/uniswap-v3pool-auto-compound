@@ -5,7 +5,7 @@
 # ========================================================
 
 # 1. 设定严格的工作目录
-WORK_DIR="/home/peter/uniswap-auto-compound"
+WORK_DIR="/home/xxxxxx/uniswap-bot"
 cd $WORK_DIR || exit 1
 
 # 2. 【核心泛化配置区】：支持任意币种对
