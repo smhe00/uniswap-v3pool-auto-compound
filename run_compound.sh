@@ -24,7 +24,7 @@ export BASE_TOKEN_INDEX=1
 export TARGET_MIN_BASE_AMOUNT_X10000=10000
 
 # 3. 定义日志文件路径
-LOG_FILE="$WORK_DIR/compound_bot.log"
+LOG_FILE="${WORK_DIR}/compound_bot_${TOKEN_ID}.log"
 DATE_STR=$(date '+%Y-%m-%d %H:%M:%S')
 
 echo "====================================================" >> $LOG_FILE
@@ -47,3 +47,4 @@ else
     echo "❌ Pipeline Failed with Exit Code: $EXIT_CODE" >> $LOG_FILE
 fi
 echo "====================================================" >> $LOG_FILE
+echo "" >> $LOG_FILE
