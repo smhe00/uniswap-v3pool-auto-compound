@@ -143,16 +143,16 @@ cat compound_bot.log
 
 如果因为收益不足而显示 `[!] SKIP` 并伴随 `Warning: No transactions to broadcast.`，说明系统测试完美通过！
 
-**设置后台定时任务：** 让机器人在后台每 4 小时自动醒来执行：
-
-```
+**设置后台定时任务 (Crontab)：**
+让机器人在后台每 4 小时自动醒来执行：
+```bash
 crontab -e
 ```
-
-在底部添加以下内容（替换为绝对路径）：
-
-```
-0 */4 * * * /你的实际路径/uniswap-bot/run_compound.sh
+在底部添加以下内容。
+*(💡 防拥堵小贴士：强烈建议把开头的分钟数设定为 `0-59` 之间的任意幸运数字，而不要用 `0`。这能打散请求，防止所有人的机器人在整点同时向 RPC 节点发起轰炸而导致 IP 被限流。)*
+```text
+# 每天每 4 小时运行一次（例如 00:14, 04:14 触发）
+14 */4 * * * /你的实际路径/uniswap-bot/run_compound.sh
 ```
 
 * * *
@@ -308,16 +308,16 @@ cat compound_bot.log
 
 If your fees are below the threshold, you should see a `[!] SKIP` message and `Warning: No transactions to broadcast.`—this means the protection is working perfectly!
 
-**Automate via Crontab:** Set the bot to run every 4 hours automatically:
-
-```
+**Automate via Crontab:**
+Set the bot to run every 4 hours automatically:
+```bash
 crontab -e
 ```
-
-Add the following line at the bottom:
-
-```
-0 */4 * * * /path/to/your/uniswap-bot/run_compound.sh
+Add the following line at the bottom. 
+*(💡 Pro Tip: Pick a random minute between `0-59` instead of `0` to prevent the "thundering herd" problem. This ensures not everyone is hitting the public RPC node exactly at the top of the hour, which could lead to IP rate-limiting.)*
+```text
+# Runs at 14 minutes past the hour, every 4 hours (e.g., 00:14, 04:14)
+14 */4 * * * /path/to/your/uniswap-bot/run_compound.sh
 ```
 
 * * *
