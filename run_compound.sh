@@ -31,7 +31,7 @@ echo "🔧 NFT ID: $TOKEN_ID | Base Index: $BASE_TOKEN_INDEX | Target(x10000): $
 # 4. 执行 Foundry 脚本
 forge script script/Compound.s.sol:AutoCompound \
     --rpc-url https://arb1.arbitrum.io/rpc \
-    --account test_bot_account \
+    --account bot_account \
     --password-file .pass \
     --broadcast \
     --via-ir >> $LOG_FILE 2>&1
