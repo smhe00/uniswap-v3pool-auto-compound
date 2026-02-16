@@ -12,35 +12,42 @@
 
 本仓库采用极简策略，仅包含核心的智能合约逻辑（`Compound.s.sol`）和外层执行流水线（`run_compound.sh`），拒绝冗余文件，确保安全透明。
 
-💡 核心特性与安全机制
-------------
+### 💡 核心特性与安全机制
 
-1.  **支持任意代币池**：无需配置外部预言机，完美支持任意币对（如 WETH/USDC, WBTC/WETH）。
-2.  **零损耗无痕探测 (Snapshot & Rollback)**：利用 Foundry 的 EVM 快照机制，在虚拟环境中模拟收取手续费。若收益未达标，立即回滚内存，**绝对不会产生真实的链上交易和 Gas 消耗**。
-3.  **网络拥堵保护 (Gas Throttling)**：实时监测 Arbitrum 的 `baseFee`，若网络拥堵则主动休眠，防止收益全交了过路费。
-4.  **越界保护 (Out-of-Range)**：若当前价格脱离你设定的流动性区间，系统将暂停复投。
-5.  **最小权限授权 (PoLP)**：将代币的授权（Approve）额度严格限制为单次所需的 28 倍。既能节省后续 90%+ 的授权 Gas 费，又将资金的安全敞口降至最低。
+1.  **支持任意代币池**：无需配置外部预言机，通过内部纯链上计价雷达，完美支持任意币对（如 WETH/USDC, WBTC/WETH）。
+2.  **AI 动态最优门限 ( $R^{\ast }$ )**：摒弃魔法数字，系统会根据实时 BaseFee、Swap 磨损及池子总本金，运用微积分方程实时算出收益最大化的复投触发门限。
+3.  **V3 动态曲率 Zap 引擎**：当探测到单边资金闲置（Excess）且达到盈亏平衡点（Break-Even  $E^{\ast }$ ）时，自动拉取当前 Tick 的精确非对称曲率，执行精准的 Swap 闪兑旁路，彻底消灭资金淤积。
+4.  **零损耗三段式解耦 (Decoupled Pipeline)**：分为收菜 (Module A)、复投 (Module B)、闪兑 (Module C) 三大独立状态机。即使收益未达标，只要外部注资充足，也能丝滑触发复投，且**条件不足时主动休眠，绝对不消耗真实 Gas**。
+5.  **最小权限缓存授权 (PoLP Cache)**：将代币和 Router 的授权（Approve）额度严格限制为单次所需的 28 倍。既能节省后续 90%+ 的授权 Gas 费，又将资金的安全敞口降至最低。
+
 ```mermaid
 graph LR
     %% Colors & Styles
     classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
     classDef gate fill:#ffe0b2,stroke:#f57c00,stroke-width:2px,color:#000;
+    classDef brain fill:#e1bee7,stroke:#8e24aa,stroke-width:2px,color:#000;
     classDef sim fill:#bbdefb,stroke:#1976d2,stroke-width:2px,color:#000;
     classDef chain fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#000;
 
-    Start((定时触发)) --> G0{Gas 正常?}:::gate
-    G0 -- 否 --> End((休眠等待))
-    G0 -- 是 --> G1{在区间内?}:::gate
+    Start(("定时触发")) --> Check{"Gas/区间 OK?"}:::gate
+    Check -- 否 --> Sleep(("休眠"))
+    Check -- 是 --> Brain["AI 计算 R*"]:::brain
     
-    G1 -- 否 --> End
-    G1 -- 是 --> Sim[快照模拟收益]:::sim
+    Brain --> ModA["模拟收菜"]:::sim
+    ModA --> ModB{"余额 >= R* ?"}:::gate
     
-    Sim --> G2{收益达标?}:::gate
+    ModB -- 否 --> Sleep
+    ModB -- 是 --> Broad(("主网广播")):::chain
     
-    G2 -- 否 --> Rev1[状态回滚]:::sim --> End
-    G2 -- 是 --> Rev2[状态回滚]:::sim --> Broad((发起广播)):::chain
+    Broad --> ExecA{"需提 Fee?"}:::gate
+    ExecA -- 是 --> Col["提取 Fee"]:::chain --> ExecC
+    ExecA -- 否 --> ExecC
     
-    Broad --> Col[提取手续费]:::chain --> App[精准授权]:::chain --> Inv[复投添加]:::chain --> Done((完成)):::chain
+    ExecC{"闲置 > Zap成本?"}:::gate
+    ExecC -- 是 --> Swap["Zap 闪兑配平"]:::chain --> App
+    ExecC -- 否 --> App["28x 预授权"]:::chain
+    
+    App --> Inv["执行复投"]:::chain --> Done(("TG 报警")):::chain
 ```
 * * *
 
@@ -111,19 +118,18 @@ nano run_compound.sh
 修改以下核心参数：
 
 ```
-# 务必修改为当前项目所在的绝对路径
-WORK_DIR="/你的实际路径/uniswap-bot"
-
 # 你的 Uniswap V3 Position NFT ID
 export TOKEN_ID=1234567
 
 # 设定“本位币”索引（0 代表 Token0，1 代表 Token1）
-# 提示：在 WETH/USDC 池子中，USDC 通常是 Token1，因此设为 1
 export BASE_TOKEN_INDEX=1
 
 # 设定复投阈值 (采用万分位 X10000 标定法)
-# 如果本位币是 USDC，20000 代表 2.0000 USDC 收益时触发复投
-export TARGET_MIN_BASE_AMOUNT_X10000=20000
+# 设为 0 即激活 AI 动态算力引擎，自动寻找最优盈亏平衡点！
+export TARGET_MIN_BASE_AMOUNT_X10000=0
+
+# 开启纯数学 Zap 闪兑旁路，极限压榨资金利用率
+export ALLOW_AUTO_ZAP="true"
 ```
 
 保存并赋予执行权限：
@@ -167,7 +173,7 @@ crontab -e
 
 * * *
 
-🇬🇧 English Version
+English Version
 ====================
 
 🚀 Universal Auto-Compound Bot for Uniswap V3 (Arbitrum)
@@ -177,35 +183,41 @@ A lightweight, highly secure, and universal auto-compounding bot for Uniswap V3 
 
 This repository takes a minimalist approach. It contains only the core smart contract logic (`Compound.s.sol`) and the execution pipeline (`run_compound.sh`).
 
-💡 Key Features & Security Mechanisms
--------------------------------------
+### 💡 Key Features & Security Mechanisms
 
-1.  **Universal Token Support**: Works with ANY token pair (e.g., WETH/USDC, WBTC/WETH). No hardcoded price oracles are required.
-2.  **Zero-Waste Snapshot Probing**: Uses Foundry's EVM snapshot & rollback features. It simulates the fee collection locally; if the target threshold isn't met, it reverts the state and gracefully exits **without broadcasting any transaction or burning Gas**.
-3.  **Gas Throttling**: Monitors network `baseFee`. If Arbitrum is congested, the bot goes to sleep to protect your yields from high gas fees.
-4.  **Out-of-Range Protection**: Halts reinvestment if the current price is outside your LP bounds.
-5.  **Least Privilege Allowance (PoLP)**: Approves exactly 28x of the required token amounts. This minimizes future `approve` gas costs while strictly limiting the blast radius of the smart contract approval.
+1.  **Universal Token Support**: Works with ANY token pair (e.g., WETH/USDC) via purely on-chain telemetry. No external oracles required.
+2.  **AI Dynamic Optimal Threshold ( $R^{\ast }$ )**: Eliminates magic numbers. Calculates the mathematically perfect reinvestment threshold in real-time based on baseFee, swap friction, and your principal size.
+3.  **V3 Dynamic Curve Zap Engine**: Detects idle excess capital and triggers a precision swap bypass based on the exact asymmetrical curve of the current Tick, ensuring zero capital stagnation.
+4.  **Decoupled 3-Stage Pipeline**: Separates Collect (Mod A), Reinvest (Mod B), and Zap (Mod C) into distinct state machines. It safely sleeps when math dictates it's unprofitable, **burning absolutely zero gas**.
+5.  **PoLP Allowance Caching**: Caches approvals at exactly 28x the required amounts for both Position Manager and Swap Router. Saves \>90% on future gas costs while strictly limiting the smart contract blast radius.
 ```mermaid
 graph LR
     %% Colors & Styles
     classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
     classDef gate fill:#ffe0b2,stroke:#f57c00,stroke-width:2px,color:#000;
+    classDef brain fill:#e1bee7,stroke:#8e24aa,stroke-width:2px,color:#000;
     classDef sim fill:#bbdefb,stroke:#1976d2,stroke-width:2px,color:#000;
     classDef chain fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#000;
 
-    Start((Cron)) --> G0{Gas OK?}:::gate
-    G0 -- No --> End((Sleep))
-    G0 -- Yes --> G1{In Range?}:::gate
+    Start(("Cron")) --> Check{"Gas/Range OK?"}:::gate
+    Check -- No --> Sleep(("Sleep"))
+    Check -- Yes --> Brain["AI Calc R*"]:::brain
     
-    G1 -- No --> End
-    G1 -- Yes --> Sim[Snapshot & Simulate]:::sim
+    Brain --> ModA["Probe Fees"]:::sim
+    ModA --> ModB{"Wallet >= R* ?"}:::gate
     
-    Sim --> G2{Target Met?}:::gate
+    ModB -- No --> Sleep
+    ModB -- Yes --> Broad(("Broadcast")):::chain
     
-    G2 -- No --> Rev1[Revert State]:::sim --> End
-    G2 -- Yes --> Rev2[Revert State]:::sim --> Broad((Broadcast)):::chain
+    Broad --> ExecA{"Harvest?"}:::gate
+    ExecA -- Yes --> Col["Collect"]:::chain --> ExecC
+    ExecA -- No --> ExecC
     
-    Broad --> Col[Collect]:::chain --> App[Approve]:::chain --> Inv[Reinvest]:::chain --> Done((Done)):::chain
+    ExecC{"Excess > Zap?"}:::gate
+    ExecC -- Yes --> Swap["V3 Curve Swap"]:::chain --> App
+    ExecC -- No --> App["28x Approve"]:::chain
+    
+    App --> Inv["Invest"]:::chain --> Done(("TG Alert")):::chain
 ```
 * * *
 
@@ -276,19 +288,14 @@ nano run_compound.sh
 Update these crucial variables:
 
 ```
-# Ensure WORK_DIR points to your actual absolute path
-WORK_DIR="/path/to/your/uniswap-bot"
-
-# Your Uniswap V3 Position NFT ID
 export TOKEN_ID=1234567
-
-# Base Token Index (0 for Token0, 1 for Token1)
-# e.g., in a WETH/USDC pool, USDC is usually Token1, so set to 1.
 export BASE_TOKEN_INDEX=1
 
-# Target Threshold (Using X10000 multiplier for decimals)
-# e.g., If Base is USDC, 20000 means triggering at 2.0000 USDC
-export TARGET_MIN_BASE_AMOUNT_X10000=20000
+# Set to 0 to unleash the AI Dynamic Threshold engine
+export TARGET_MIN_BASE_AMOUNT_X10000=0
+
+# Enable the Pure Math Zap Engine for max capital efficiency
+export ALLOW_AUTO_ZAP="true"
 ```
 
 Make the script executable:
@@ -328,7 +335,3 @@ Add the following line at the bottom.
 This code is provided for educational and technical exploration purposes only. DeFi and smart contracts carry inherent risks. Please review the code thoroughly and test it with a small amount of funds before deploying. The creator is not responsible for any financial losses incurred.
 
 * * *
-
-
----
-Powered by [Gemini Exporter](https://www.ai-chat-exporter.com)
