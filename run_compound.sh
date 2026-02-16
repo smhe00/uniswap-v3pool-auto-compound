@@ -21,7 +21,11 @@ export BASE_TOKEN_INDEX=1
 # 设定复投阈值 (X10000 标定法)
 # 如果 BASE 为 USDC，20000 代表 2.0000 USDC
 # 如果 BASE 为 WETH，100 代表 0.0100 WETH
-export TARGET_MIN_BASE_AMOUNT_X10000=10000
+# 如果 该参数设置为0, 则由脚本计算最优复投门限=SQRT(2*C*P) 
+export TARGET_MIN_BASE_AMOUNT_X10000=0
+
+# 是否允许自动Zap(自动兑换平衡复投币种) true/false
+export ALLOW_AUTO_ZAP="true"
 
 # 3. 定义日志文件路径
 LOG_FILE="${WORK_DIR}/compound_bot_${TOKEN_ID}.log"
@@ -32,6 +36,7 @@ echo "🚀 Pipeline Triggered at: $DATE_STR" >> $LOG_FILE
 echo "🔧 NFT ID: $TOKEN_ID | Base Index: $BASE_TOKEN_INDEX | Target(x10000): $TARGET_MIN_BASE_AMOUNT_X10000" >> $LOG_FILE
 
 # 4. 执行 Foundry 脚本
+# 如果需要虚拟执行调试, 可以先去除--broadcast选项
 forge script script/Compound.s.sol:AutoCompound \
     --rpc-url https://arb1.arbitrum.io/rpc \
     --account bot_account \
