@@ -58,7 +58,7 @@ graph LR
 
 本程序依赖 Foundry 框架。请在 Linux（推荐 Ubuntu）或 macOS 服务器终端中执行：
 
-```
+```bash
 curl -L https://foundry.paradigm.xyz | bash
 source ~/.bashrc  # 或 ~/.zshrc
 foundryup
@@ -69,7 +69,7 @@ foundryup
 
 由于本仓库仅提供核心脚本，你需要先初始化一个空的 Foundry 项目环境：
 
-```
+```bash
 # 1. 初始化标准 Foundry 项目
 forge init uniswap-bot
 cd uniswap-bot
@@ -95,7 +95,7 @@ mv 你的下载路径/email_monitor.sh ./
 
 请勿使用明文私钥。运行以下命令将私钥安全加密：
 
-```
+```bash
 cast wallet import bot_account --interactive
 
 ```
@@ -105,7 +105,7 @@ cast wallet import bot_account --interactive
 
 创建一个拥有严格权限的隐藏文件来存放该密码，供后台脚本读取：
 
-```
+```bash
 nano .pass
 # 输入你刚才设置的密码，按 Ctrl+O 保存，回车确认，Ctrl+X 退出
 chmod 600 .pass # 确保仅当前用户可读
@@ -116,14 +116,14 @@ chmod 600 .pass # 确保仅当前用户可读
 
 编辑主流水线脚本，输入你的仓位信息：
 
-```
+```bash
 nano run_compound.sh
 
 ```
 
 修改以下核心参数：
 
-```
+```bash
 # 你的 Uniswap V3 Position NFT ID
 export TOKEN_ID=1234567
 
@@ -141,7 +141,7 @@ export ALLOW_AUTO_ZAP="true"
 
 接着，配置你的邮件报警雷达（以 163 邮箱为例）：
 
-```
+```bash
 nano email_monitor.sh
 # 填入你的发件箱、应用专有授权码、以及接收报警的邮箱
 
@@ -149,16 +149,25 @@ nano email_monitor.sh
 
 保存并赋予两个脚本执行权限：
 
-```
+```bash
 chmod +x run_compound.sh email_monitor.sh
 
 ```
 
 ### 第六步：测试与后台守护 (Crontab)
 
-使用带邮件雷达的完整外壳，手动运行一次测试环境：
+**选项 A：裸跑测试 (推荐首次调试使用)**
+在挂载邮件报警器之前，强烈建议先直接运行核心业务脚本。这能让你最直观地看到 AI 引擎在终端打印出的计算日志，确认一切无误：
+
+```bash
+./run_compound.sh
 
 ```
+
+**选项 B：全链路外壳测试**
+确认核心业务逻辑无误后，使用带有邮件雷达的完整外壳进行全链路测试：
+
+```bash
 ./email_monitor.sh ./run_compound.sh
 
 ```
@@ -247,7 +256,7 @@ graph LR
 
 This bot is powered by Foundry. Install it on your Linux (recommended) or macOS server:
 
-```
+```bash
 curl -L https://foundry.paradigm.xyz | bash
 source ~/.bashrc  # or ~/.zshrc
 foundryup
@@ -258,7 +267,7 @@ foundryup
 
 Since this repo only provides the raw scripts, initialize an empty Foundry project and replace the default scripts:
 
-```
+```bash
 # 1. Initialize a new Foundry project
 forge init uniswap-bot
 cd uniswap-bot
@@ -284,7 +293,7 @@ mv path/to/downloaded/email_monitor.sh ./
 
 Never store plain-text private keys. Use Foundry's keystore to encrypt it:
 
-```
+```bash
 cast wallet import bot_account --interactive
 
 ```
@@ -294,7 +303,7 @@ cast wallet import bot_account --interactive
 
 Create a strict-permission file to store this password so the cronjob can read it:
 
-```
+```bash
 nano .pass
 # Type your password, save (Ctrl+O, Enter) and exit (Ctrl+X)
 chmod 600 .pass # Ensure only your user can read this file
@@ -305,14 +314,14 @@ chmod 600 .pass # Ensure only your user can read this file
 
 Edit `run_compound.sh` to match your position:
 
-```
+```bash
 nano run_compound.sh
 
 ```
 
 Update these crucial variables:
 
-```
+```bash
 export TOKEN_ID=1234567
 export BASE_TOKEN_INDEX=1
 
@@ -326,7 +335,7 @@ export ALLOW_AUTO_ZAP="true"
 
 Next, configure your email radar:
 
-```
+```bash
 nano email_monitor.sh
 # Fill in your SMTP server, sender email, app password, and receiver email
 
@@ -334,16 +343,25 @@ nano email_monitor.sh
 
 Make both scripts executable:
 
-```
+```bash
 chmod +x run_compound.sh email_monitor.sh
 
 ```
 
 ### Step 6: Test and Automate
 
-Run the full wrapper script manually to ensure everything is configured correctly:
+**Option A: Naked Run (Recommended for initial debugging)**
+Before attaching the email radar, it is highly recommended to run the core script directly. This allows you to observe the AI engine's calculations printed cleanly in the terminal:
+
+```bash
+./run_compound.sh
 
 ```
+
+**Option B: Full Pipeline Test**
+Once you verify the core logic, run the full wrapper script manually to test the telemetry radar:
+
+```bash
 ./email_monitor.sh ./run_compound.sh
 
 ```
