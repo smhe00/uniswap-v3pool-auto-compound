@@ -349,13 +349,10 @@ contract AutoCompound is Script {
             if (allowZap) {
                 console.log("\n--- Module C: V3 Dynamic Curve Zap Engine ---");
                 
-                // 1. 获取当前钱包真实总价值
                 uint256 val0 = getTotalValueBase(finalBal0, 0, sqrtPriceX96, baseTokenIndex);
                 uint256 val1 = getTotalValueBase(0, finalBal1, sqrtPriceX96, baseTokenIndex);
                 uint256 walletTotalVal = val0 + val1;
 
-                // 2. [黑科技] 向 V3 底层查询当前 Tick 下最完美的物理配比
-                // 我们虚拟添加 1e18 的流动性，看看池子要求多少 token0 和 token1
                 (uint256 req0, uint256 req1) = getAmountsForLiquidity(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, 1e18);
                 uint256 reqVal0 = getTotalValueBase(req0, 0, sqrtPriceX96, baseTokenIndex);
                 uint256 reqVal1 = getTotalValueBase(0, req1, sqrtPriceX96, baseTokenIndex);
@@ -363,79 +360,76 @@ contract AutoCompound is Script {
 
                 require(reqTotalVal > 0, "Invalid pool ratio");
 
-                // 3. 映射完美比例到我们的钱包余额，算出理想 Target
                 uint256 targetVal0 = (walletTotalVal * reqVal0) / reqTotalVal;
                 uint256 targetVal1 = (walletTotalVal * reqVal1) / reqTotalVal;
 
-                // 4. 算出真正的“单边超额残渣”
+                // 1. 算出“闪兑催化剂” (需要被 Swap 的偏差值，即钥匙)
                 bool is0Dominant = val0 > targetVal0;
                 uint256 excessVal = is0Dominant ? (val0 - targetVal0) : (val1 - targetVal1);
+
+                // 2. [数学魔法] 算出这笔催化剂能“撬动”的【全部真实闲置资金】(钥匙 + 宝藏)！
+                // 推导: 闲置总资金 = 偏差值 * (总比例 / 稀缺方比例)
+                uint256 totalIdleCapital = is0Dominant ? (excessVal * reqTotalVal) / reqVal1 : (excessVal * reqTotalVal) / reqVal0;
 
                 uint256 feeRateHalfX1e6 = fee / 2; 
                 uint256 expectedYieldRateX1e6 = (optimalThresholdBase * 1e6) / record.principalTotalBase;
 
                 console.log(string.concat("  -> Target Ratio     : ", is0Dominant ? sym0 : sym1, " needs to be swapped."));
-                console.log(string.concat("  -> Cycle Yield Rate : ", vm.toString(expectedYieldRateX1e6), " ppm"));
-                console.log(string.concat("  -> Swap Fee Hurdle  : ", vm.toString(feeRateHalfX1e6), " ppm"));
+                console.log(string.concat("  -> Excess Catalyst  : ", formatDecimals(excessVal, decBase), " ", symBase));
+                console.log(string.concat("  -> Total Idle Cap.  : ", formatDecimals(totalIdleCapital, decBase), " ", symBase));
 
-                if (expectedYieldRateX1e6 <= feeRateHalfX1e6) {
-                    console.log("  -> [FATAL BYPASS] Cycle yield cannot cover Swap Fee. Never Zap!");
-                } else {
-                    uint256 zapGasCostBase = (tx.gasprice * 150000 * ethPriceInBase) / 1e18;
-                    uint256 dynamicZapThreshold = (zapGasCostBase * 1e6) / (expectedYieldRateX1e6 - feeRateHalfX1e6);
+                // 3. 计算绝对利润：全部闲置资金的预期收益 vs (Swap手续费 + 链上Gas)
+                uint256 expectedGain = (totalIdleCapital * expectedYieldRateX1e6) / 1e6;
+                uint256 swapFeeCost = (excessVal * feeRateHalfX1e6) / 1e6;
+                uint256 zapGasCostBase = (tx.gasprice * 150000 * ethPriceInBase) / 1e18;
 
-                    console.log(string.concat("  -> True Excess Cap. : ", formatDecimals(excessVal, decBase), " ", symBase));
-                    console.log(string.concat("  -> Zap Break-Even E*: ", formatDecimals(dynamicZapThreshold, decBase), " ", symBase));
+                console.log(string.concat("  -> Exp. Zap Gain    : ", formatDecimals(expectedGain, decBase), " ", symBase));
+                console.log(string.concat("  -> Est. Gas+Fee Cost: ", formatDecimals(zapGasCostBase + swapFeeCost, decBase), " ", symBase));
 
-                    if (excessVal > dynamicZapThreshold) {
-                        console.log("  -> [ZAP APPROVED] Excess > E*. Executing precision swap...");
+                // 4. 终极判决：只要生息利润大于摩擦成本，立刻扣动扳机
+                if (expectedGain > (zapGasCostBase + swapFeeCost)) {
+                    console.log("  -> [ZAP APPROVED] Gain > Cost. Executing precision swap...");
+                    
+                    if (is0Dominant) {
+                        uint256 swapAmount0 = (finalBal0 * excessVal) / val0;
+                        console.log(string.concat("  -> Swapping ", sym0, " : ", formatDecimals(swapAmount0, dec0)));
                         
-                        if (is0Dominant) {
-                            // 精确抛售多余的 Token0
-                            uint256 swapAmount0 = (finalBal0 * excessVal) / val0;
-                            console.log(string.concat("  -> Swapping ", sym0, " : ", formatDecimals(swapAmount0, dec0)));
-                            
-                            //预读 Router 授权，不够才授权 28 倍
-                            uint256 routerAllowance0 = IERC20Metadata(token0).allowance(owner, SWAP_ROUTER);
-                            if (routerAllowance0 < swapAmount0) {
-                                uint256 approveAmt = swapAmount0 * APPROVE_MULTIPLIER;
-                                IERC20Metadata(token0).approve(SWAP_ROUTER, approveAmt);
-                                console.log(string.concat("  -> [Prefetch] Approving Router for ", sym0));
-                            }
-                            ISwapRouter(SWAP_ROUTER).exactInputSingle(
-                                ISwapRouter.ExactInputSingleParams({
-                                    tokenIn: token0, tokenOut: token1, fee: fee, recipient: owner,
-                                    deadline: block.timestamp + 1200, amountIn: swapAmount0, amountOutMinimum: 0, sqrtPriceLimitX96: 0
-                                })
-                            );
-                        } else {
-                            // 精确抛售多余的 Token1
-                            uint256 swapAmount1 = (finalBal1 * excessVal) / val1;
-                            console.log(string.concat("  -> Swapping ", sym1, " : ", formatDecimals(swapAmount1, dec1)));
-                            
-                            //预读 Router 授权，不够才授权 28 倍
-                            uint256 routerAllowance1 = IERC20Metadata(token1).allowance(owner, SWAP_ROUTER);
-                            if (routerAllowance1 < swapAmount1) {
-                                uint256 approveAmt = swapAmount1 * APPROVE_MULTIPLIER;
-                                IERC20Metadata(token1).approve(SWAP_ROUTER, approveAmt);
-                                console.log(string.concat("  -> [Prefetch] Approving Router for ", sym1));
-                            }
-                            ISwapRouter(SWAP_ROUTER).exactInputSingle(
-                                ISwapRouter.ExactInputSingleParams({
-                                    tokenIn: token1, tokenOut: token0, fee: fee, recipient: owner,
-                                    deadline: block.timestamp + 1200, amountIn: swapAmount1, amountOutMinimum: 0, sqrtPriceLimitX96: 0
-                                })
-                            );
+                        uint256 routerAllowance0 = IERC20Metadata(token0).allowance(owner, SWAP_ROUTER);
+                        if (routerAllowance0 < swapAmount0) {
+                            uint256 approveAmt = swapAmount0 * APPROVE_MULTIPLIER;
+                            IERC20Metadata(token0).approve(SWAP_ROUTER, approveAmt);
                         }
-                        
-                        // 刷新最新余额，现在它是 100% 契合 V3 曲率的完美弹药！
-                        finalBal0 = IERC20Metadata(token0).balanceOf(owner);
-                        finalBal1 = IERC20Metadata(token1).balanceOf(owner);
+                        ISwapRouter(SWAP_ROUTER).exactInputSingle(
+                            ISwapRouter.ExactInputSingleParams({
+                                tokenIn: token0, tokenOut: token1, fee: fee, recipient: owner,
+                                deadline: block.timestamp + 1200, amountIn: swapAmount0, amountOutMinimum: 0, sqrtPriceLimitX96: 0
+                            })
+                        );
                     } else {
-                        console.log("  -> [BYPASS] Excess < E*. Mathematically unprofitable to Zap.");
+                        uint256 swapAmount1 = (finalBal1 * excessVal) / val1;
+                        console.log(string.concat("  -> Swapping ", sym1, " : ", formatDecimals(swapAmount1, dec1)));
+                        
+                        uint256 routerAllowance1 = IERC20Metadata(token1).allowance(owner, SWAP_ROUTER);
+                        if (routerAllowance1 < swapAmount1) {
+                            uint256 approveAmt = swapAmount1 * APPROVE_MULTIPLIER;
+                            IERC20Metadata(token1).approve(SWAP_ROUTER, approveAmt);
+                        }
+                        ISwapRouter(SWAP_ROUTER).exactInputSingle(
+                            ISwapRouter.ExactInputSingleParams({
+                                tokenIn: token1, tokenOut: token0, fee: fee, recipient: owner,
+                                deadline: block.timestamp + 1200, amountIn: swapAmount1, amountOutMinimum: 0, sqrtPriceLimitX96: 0
+                            })
+                        );
                     }
+                    
+                    // 刷新最新物理余额，此时已成完美配比
+                    finalBal0 = IERC20Metadata(token0).balanceOf(owner);
+                    finalBal1 = IERC20Metadata(token1).balanceOf(owner);
+                } else {
+                    console.log("  -> [BYPASS] Gain <= Cost. Mathematically unprofitable to Zap.");
                 }
             }
+
             // [执行复投]
             uint256 allowance0 = IERC20Metadata(token0).allowance(owner, POSITION_MANAGER);
             uint256 allowance1 = IERC20Metadata(token1).allowance(owner, POSITION_MANAGER);
