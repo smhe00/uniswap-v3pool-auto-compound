@@ -52,6 +52,11 @@ interface ISwapRouter {
     function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
 }
 
+interface IWETH9 {
+    function balanceOf(address account) external view returns (uint256);
+    function withdraw(uint256 wad) external;
+}
+
 library Math {
     function sqrt(uint256 y) internal pure returns (uint256 z) {
         if (y > 3) {
@@ -69,6 +74,8 @@ contract AutoCompound is Script {
     address constant FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
     address constant WETH = 0x82aF49447D8a07e3bd95BD0d56f35241523fBab1;
     address constant SWAP_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
+    
+    bool private debugMode;
 
     struct LogRecord {
         uint256 timestamp;
@@ -83,6 +90,10 @@ contract AutoCompound is Script {
         uint256 fee0;
         uint256 fee1;
         uint256 feeTotalBase;
+    }
+
+    function logDebug(string memory msg1, uint256 val) internal view {
+        if (debugMode) console.log(string.concat("[DEBUG] ", msg1, vm.toString(val)));
     }
 
     function getValueOf0In1(uint256 amount0, uint160 sqrtRatioX96) internal pure returns (uint256) {
@@ -157,13 +168,30 @@ contract AutoCompound is Script {
         return 3000 * (10 ** baseDecimals);
     }
 
+    // Refined formatter with 8-decimal limit
     function formatDecimals(uint256 value, uint8 decimals) internal pure returns (string memory) {
         if (decimals == 0) return vm.toString(value);
-        uint256 base = 10**decimals; uint256 intPart = value / base; uint256 fracPart = value % base;
+        uint256 base = 10**decimals; 
+        uint256 intPart = value / base; 
+        uint256 fracPart = value % base;
+        
         string memory fracString = vm.toString(fracPart);
-        uint256 padding = decimals - bytes(fracString).length; string memory zeros = "";
+        uint256 padding = decimals - bytes(fracString).length; 
+        string memory zeros = "";
         for (uint256 i = 0; i < padding; i++) { zeros = string.concat(zeros, "0"); }
-        return string.concat(vm.toString(intPart), ".", zeros, fracString);
+        
+        string memory fullFrac = string.concat(zeros, fracString);
+        
+        // Hard-clip to 8 decimal places for cleaner logs
+        if (bytes(fullFrac).length > 8) {
+            bytes memory truncated = new bytes(8);
+            for(uint i=0; i<8; i++) {
+                truncated[i] = bytes(fullFrac)[i];
+            }
+            fullFrac = string(truncated);
+        }
+        
+        return string.concat(vm.toString(intPart), ".", fullFrac);
     }
 
     function getBeijingTime(uint256 timestamp) internal pure returns (string memory) {
@@ -189,17 +217,19 @@ contract AutoCompound is Script {
         IMinimalPositionManager manager = IMinimalPositionManager(POSITION_MANAGER);
         LogRecord memory record;
 
-        // --- Fetch Environment Variables ---
+        // --- 0. Initialize ---
         uint256 tokenId = vm.envUint("TOKEN_ID");
         uint8 baseTokenIndex = uint8(vm.envUint("BASE_TOKEN_INDEX"));
-        require(baseTokenIndex == 0 || baseTokenIndex == 1, "BASE_TOKEN_INDEX must be 0 or 1");
         uint256 targetMinX10000 = vm.envUint("TARGET_MIN_BASE_AMOUNT_X10000");
         bool allowZap = vm.envOr("ALLOW_AUTO_ZAP", false);
+        debugMode = vm.envOr("DEBUG_ENABLE", false);
 
-        // 1. Fetch Context & Token Metadata
+        // ====================================================
+        // 🔍 PHASE 1: ANALYSIS & PRE-CALCULATION
+        // ====================================================
+
         record.timestamp = block.timestamp;
         record.baseFee = block.basefee;
-        
         address owner = manager.ownerOf(tokenId);
         (, , address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity, , , , ) = manager.positions(tokenId);
         
@@ -207,21 +237,19 @@ contract AutoCompound is Script {
         string memory sym1 = IERC20Metadata(token1).symbol();
         uint8 dec0 = IERC20Metadata(token0).decimals();
         uint8 dec1 = IERC20Metadata(token1).decimals();
-
         string memory symBase = baseTokenIndex == 0 ? sym0 : sym1;
         uint8 decBase = baseTokenIndex == 0 ? dec0 : dec1;
         address baseTokenAddress = baseTokenIndex == 0 ? token0 : token1;
         
         address poolAddress = IUniswapV3Factory(FACTORY).getPool(token0, token1, fee);
         (, int24 currentTick, , , , , ) = IUniswapV3Pool(poolAddress).slot0();
-
+        uint160 sqrtPriceX96 = getSqrtRatioAtTick(currentTick);
+        
         record.currentTick = currentTick;
         record.inRange = (currentTick >= tickLower && currentTick < tickUpper);
-
-        uint160 sqrtPriceX96 = getSqrtRatioAtTick(currentTick);
+        
         uint160 sqrtPriceAX96 = getSqrtRatioAtTick(tickLower);
         uint160 sqrtPriceBX96 = getSqrtRatioAtTick(tickUpper);
-
         uint256 price0In1 = getValueOf0In1(10**uint256(dec0), sqrtPriceX96);
         uint256 priceA0In1 = getValueOf0In1(10**uint256(dec0), sqrtPriceAX96);
         uint256 priceB0In1 = getValueOf0In1(10**uint256(dec0), sqrtPriceBX96);
@@ -229,52 +257,28 @@ contract AutoCompound is Script {
         console.log("====================================================");
         console.log("             UNIVERSAL TELEMETRY DASHBOARD          ");
         console.log("====================================================");
-        console.log(string.concat("Time (UTC+8)   : ", getBeijingTime(record.timestamp)));
-        console.log(string.concat("Token NFT ID   : ", vm.toString(tokenId)));
-        console.log(string.concat("Base Token Set : ", symBase, " (Index: ", vm.toString(baseTokenIndex), ")"));
-        console.log(string.concat("BaseFee (Gwei) : ", formatDecimals(record.baseFee, 9)));
-        console.log(string.concat("Current Price  : ", formatDecimals(price0In1, dec1), " ", sym1, "/", sym0, " (Tick: ", vm.toString(record.currentTick), ")"));
-        console.log(string.concat("Position Range : ", formatDecimals(priceA0In1, dec1), " <---> ", formatDecimals(priceB0In1, dec1), " ", sym1, "/", sym0));
-        console.log(string.concat("Status         : ", record.inRange ? "IN-RANGE [OK]" : "OUT-OF-RANGE [WARN]"));
-
-        if (record.baseFee > MAX_BASE_FEE_WEI) {
-            console.log("\n[!] SKIP: Network congested. BaseFee exceeds threshold.");
-            return;
-        }
+        console.log(string.concat("Time (UTC+8)    : ", getBeijingTime(record.timestamp)));
+        console.log(string.concat("Token NFT ID    : ", vm.toString(tokenId)));
+        console.log(string.concat("Base Token Set  : ", symBase, " (Index: ", vm.toString(baseTokenIndex), ")"));
+        console.log(string.concat("BaseFee (Gwei)  : ", formatDecimals(record.baseFee, 9)));
+        console.log(string.concat("Current Price   : ", formatDecimals(price0In1, dec1), " ", sym1, "/", sym0, " (Tick: ", vm.toString(record.currentTick), ")"));
+        console.log(string.concat("Position Range  : ", formatDecimals(priceA0In1, dec1), " <---> ", formatDecimals(priceB0In1, dec1), " ", sym1, "/", sym0));
+        console.log(string.concat("Status          : ", record.inRange ? "IN-RANGE [OK]" : "OUT-OF-RANGE [WARN]"));
 
         if (!record.inRange) {
-            console.log("\n[!] FATAL ERROR: Position is OUT OF RANGE!");
-            return; 
+             console.log("\n[!] FATAL: Position OUT OF RANGE. Stopping."); 
+             return; 
         }
 
         (record.principal0, record.principal1) = getAmountsForLiquidity(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, liquidity);
         record.principalTotalBase = getTotalValueBase(record.principal0, record.principal1, sqrtPriceX96, baseTokenIndex);
 
         console.log("\n--- Principal Liquidity ---");
-        console.log(string.concat("  -> ", sym0, "      : ", formatDecimals(record.principal0, dec0)));
-        console.log(string.concat("  -> ", sym1, "      : ", formatDecimals(record.principal1, dec1)));
-        console.log(string.concat("  Total Value  : ", formatDecimals(record.principalTotalBase, decBase), " ", symBase));
+        console.log(string.concat(" -> ", sym0, "       : ", formatDecimals(record.principal0, dec0)));
+        console.log(string.concat(" -> ", sym1, "       : ", formatDecimals(record.principal1, dec1)));
+        console.log(string.concat(" Total Value  : ", formatDecimals(record.principalTotalBase, decBase), " ", symBase));
 
-        // ==========================================
-        // 1. 独立计算最优门限 R*
-        // ==========================================
-        uint256 optimalThresholdBase;
-        uint256 ethPriceInBase = getEthPriceInBase(baseTokenAddress, decBase);
-
-        if (targetMinX10000 == 0) {
-            uint256 estimatedGas = allowZap ? 380000 : 250000;
-            //uint256 estimatedGas = 250000; // 综合估算中位数
-            uint256 costCInBase = (tx.gasprice * estimatedGas * ethPriceInBase) / 1e18;
-            optimalThresholdBase = Math.sqrt(2 * record.principalTotalBase * costCInBase);
-            console.log("\n[AI Brain] Dynamic R* Threshold Computed:");
-            console.log(string.concat("  -> Optimal R* : ", formatDecimals(optimalThresholdBase, decBase), " ", symBase));
-        } else {
-            optimalThresholdBase = (targetMinX10000 * (10**uint256(decBase))) / 10000;
-        }
-
-        // ==========================================
-        // 2. 独立模块 A：判决是否收取 Fee
-        // ==========================================
+        // 1.2 Simulate Collect
         uint256 snapshotId = vm.snapshot();
         vm.startPrank(owner);
         IMinimalPositionManager.CollectParams memory simParams = IMinimalPositionManager.CollectParams({
@@ -285,161 +289,214 @@ contract AutoCompound is Script {
         require(vm.revertTo(snapshotId), "Snapshot rollback failed");
 
         record.feeTotalBase = getTotalValueBase(record.fee0, record.fee1, sqrtPriceX96, baseTokenIndex);
+
+        // 1.3 Fetch Wallet Balances
+        uint256 wallet0 = IERC20Metadata(token0).balanceOf(owner);
+        uint256 wallet1 = IERC20Metadata(token1).balanceOf(owner);
+        uint256 walletTotalBase = getTotalValueBase(wallet0, wallet1, sqrtPriceX96, baseTokenIndex);
         
-        console.log("\n--- Module A: Collect Check ---");
-        console.log(string.concat("  -> Pending Fee: ", formatDecimals(record.feeTotalBase, decBase), " ", symBase));
+        // Calculate Total Capital Breakdowns
+        uint256 totalInvestableBase = record.feeTotalBase + walletTotalBase;
+        uint256 total0 = wallet0 + record.fee0;
+        uint256 total1 = wallet1 + record.fee1;
+
+        // 1.4 Calculate R* Threshold
+        uint256 optimalThresholdBase;
+        uint256 ethPriceInBase = getEthPriceInBase(baseTokenAddress, decBase);
+        uint256 costCInBase; // keep in function scope for empty-position Zap fallback
+        bool isAutoCalc = false; 
+
+        if (targetMinX10000 == 0) {
+            uint256 estimatedGas = allowZap ? 380000 : 250000;
+            costCInBase = (tx.gasprice * estimatedGas * ethPriceInBase) / 1e18;
+            optimalThresholdBase = Math.sqrt(2 * record.principalTotalBase * costCInBase);
+            isAutoCalc = true;
+        } else {
+            optimalThresholdBase = (targetMinX10000 * (10**uint256(decBase))) / 10000;
+        }
         
-        bool shouldCollect = record.feeTotalBase >= optimalThresholdBase;
-        if (shouldCollect) {
-            console.log("  -> [YES] Fee >= R*. Will execute Collect.");
+        console.log("\n--- Asset & Threshold Analysis ---");
+        // [Detailed] Pending Fee breakdown
+        console.log(string.concat(" Pending Fee    : ", formatDecimals(record.feeTotalBase, decBase), " ", symBase,
+            string.concat(" ( ", formatDecimals(record.fee0, dec0), " ", sym0, " / ", formatDecimals(record.fee1, dec1), " ", sym1, " )")
+        ));
+        
+        // [Detailed] Wallet breakdown
+        console.log(string.concat(" Wallet Balance : ", formatDecimals(walletTotalBase, decBase), " ", symBase, 
+            string.concat(" ( ", formatDecimals(wallet0, dec0), " ", sym0, " / ", formatDecimals(wallet1, dec1), " ", sym1, " )")
+        ));
+        
+        // [Detailed] Total Capital breakdown
+        console.log(string.concat(" Total Capital  : ", formatDecimals(totalInvestableBase, decBase), " ", symBase,
+            string.concat(" ( ", formatDecimals(total0, dec0), " ", sym0, " / ", formatDecimals(total1, dec1), " ", sym1, " )")
+        ));
+
+        if (isAutoCalc) {
+            console.log(string.concat(" Optimal R* : ", formatDecimals(optimalThresholdBase, decBase), " ", symBase, " (Auto-Dynamic)"));
         } else {
-            console.log("  -> [NO] Fee < R*. Skipping Collect.");
+            console.log(string.concat(" Optimal R* : ", formatDecimals(optimalThresholdBase, decBase), " ", symBase, " (Manual-Fixed)"));
         }
 
-        // ==========================================
-        // 3. 独立模块 B：预判复投火力
-        // ==========================================
-        // 预测钱包将拥有的资产（当前物理余额 + 即将收取的预期Fee）
-        uint256 expectedBal0 = IERC20Metadata(token0).balanceOf(owner) + (shouldCollect ? record.fee0 : 0);
-        uint256 expectedBal1 = IERC20Metadata(token1).balanceOf(owner) + (shouldCollect ? record.fee1 : 0);
-        uint256 expectedWalletTotalBase = getTotalValueBase(expectedBal0, expectedBal1, sqrtPriceX96, baseTokenIndex);
+        // 1.5 Fuel Check & Net Asset Calculation
+        uint256 currentEth = owner.balance; 
+        
+        // ----------------------------------------------------
+        // [PRODUCTION PARAMS]
+        // ----------------------------------------------------
+        uint256 minEth = 0.001 ether;     
+        uint256 targetEth = 0.004 ether;  
+        uint256 minRefuelChunk = 0.001 ether; 
+        
+	// [TEST PARAMS]
+        // uint256 minEth = 10.007 ether;     
+        // uint256 targetEth = 10.008 ether;  
+        // uint256 minRefuelChunk = 10.001 ether; 
+        
+        bool needRefuel = false;
+        uint256 refuelAmount = 0;
 
-        console.log("\n--- Module B: Reinvest Check ---");
-        console.log(string.concat("  -> Exp. Wallet: ", formatDecimals(expectedWalletTotalBase, decBase), " ", symBase));
+        // 初始化 projectedBal (基础值 = 钱包余额 + 待收Fee)
+        uint256 projectedBal0 = wallet0 + record.fee0;
+        uint256 projectedBal1 = wallet1 + record.fee1;
 
-        bool shouldReinvest = expectedWalletTotalBase >= optimalThresholdBase;
-        if (shouldReinvest) {
-            console.log("  -> [YES] Wallet >= R*. Will execute Reinvest.");
+        if (currentEth < minEth) {
+            uint256 deficit = targetEth - currentEth;
+            uint256 availableWeth = 0;
+            
+            if (WETH == token0) availableWeth = projectedBal0;
+            else if (WETH == token1) availableWeth = projectedBal1;
+            else console.log("[WARN] No WETH in this pair to refuel!");
+
+            if (availableWeth >= deficit) {
+                refuelAmount = deficit;
+                needRefuel = true;
+                console.log(string.concat("\n[Fuel Check] LOW GAS! Will Refuel Full Amount: ", formatDecimals(refuelAmount, 18), " ETH"));
+            } else if (availableWeth >= minRefuelChunk) {
+                refuelAmount = availableWeth;
+                needRefuel = true;
+                console.log(string.concat("\n[Fuel Check] LOW GAS! Partial Refuel (Best Effort): ", formatDecimals(refuelAmount, 18), " ETH"));
+            } else {
+                console.log("\n[ALARM] CRITICAL: LOW GAS & INSUFFICIENT WETH TO REFUEL!");
+                console.log(string.concat(" -> Current Gas    : ", formatDecimals(currentEth, 18), " ETH (Min Required: ", formatDecimals(minEth, 18), ")"));
+                console.log(string.concat(" -> WETH Available : ", formatDecimals(availableWeth, 18), " ETH"));
+                console.log(string.concat(" -> Min Refuel Chunk: ", formatDecimals(minRefuelChunk, 18), " ETH"));
+                console.log("[STOP] Execution Aborted to prevent gas exhaustion.");
+                return; // ⛔️ 强制退出
+            }
+        }
+
+        if (needRefuel) {
+            if (WETH == token0) {
+                projectedBal0 -= refuelAmount; 
+            } else if (WETH == token1) {
+                projectedBal1 -= refuelAmount;
+            }
+        }
+
+        uint256 netInvestableBase = getTotalValueBase(projectedBal0, projectedBal1, sqrtPriceX96, baseTokenIndex);
+        
+        bool shouldExecute = netInvestableBase >= optimalThresholdBase;
+        if (needRefuel && netInvestableBase > 0) shouldExecute = true;
+
+        if (shouldExecute) {
+             console.log(string.concat(" -> [DECISION] Status: Capital > R*. EXECUTE (Collect + ", needRefuel ? "Refuel + " : "", "Invest)"));
         } else {
-            console.log("  -> [NO] Wallet < R*. Skipping Reinvest.");
+            console.log(" -> [DECISION] Status: Capital < R*. WAIT.");
+            console.log("[zZZ] Going back to sleep.");
+            return; 
         }
 
-        // 如果两个动作都不需要执行，打印详细的对比数据并彻底休眠！
-        if (!shouldCollect && !shouldReinvest) {
-            console.log(unicode"\n[💤] SKIP: Conditions not met for any action.");
-            console.log(string.concat("  -> Target Threshold (R*) : ", formatDecimals(optimalThresholdBase, decBase), " ", symBase));
-            console.log(string.concat("  -> Current Pending Fee   : ", formatDecimals(record.feeTotalBase, decBase), " ", symBase, " (Need >= R*)"));
-            console.log(string.concat("  -> Current Wallet Cap.   : ", formatDecimals(expectedWalletTotalBase, decBase), " ", symBase, " (Need >= R*)"));
-            console.log("Going back to sleep to save Gas.");
-            console.log("====================================================");
-            return;
-        }
-
-        // ==========================================
-        // 🚨 ENTERING REAL ON-CHAIN MUTATION PHASE 🚨
-        // ==========================================
+        // ====================================================
+        // 🚀 PHASE 2: ATOMIC EXECUTION (Write)
+        // ====================================================
         console.log(unicode"\n[🚀] Firing up the execution pipeline...");
         vm.startBroadcast();
 
-        // [执行模块 A]
-        if (shouldCollect) {
-            manager.collect(simParams);
-            console.log("  -> [Collected] Successfully harvested fees.");
+        // 2.1 Action: Collect
+        (uint256 col0, uint256 col1) = manager.collect(simParams); 
+        console.log(string.concat(" -> [Action] Collect Executed. Got: ", formatDecimals(col0, dec0), " ", sym0, " / ", formatDecimals(col1, dec1), " ", sym1));
+
+        // 2.2 Action: Refuel
+        if (needRefuel && refuelAmount > 0) {
+            IWETH9(WETH).withdraw(refuelAmount);
+            console.log(string.concat(" -> [Action] Refuel Executed. Unwrapped ", formatDecimals(refuelAmount, 18), " WETH."));
         }
 
-        // [执行模块 B & C]
-        if (shouldReinvest) {
-            // 重新读取最真实的物理余额（防止模拟误差）
-            uint256 finalBal0 = IERC20Metadata(token0).balanceOf(owner);
-            uint256 finalBal1 = IERC20Metadata(token1).balanceOf(owner);
+        // 2.3 Action: Zap & Invest
+        uint256 finalBal0 = IERC20Metadata(token0).balanceOf(owner);
+        uint256 finalBal1 = IERC20Metadata(token1).balanceOf(owner);
 
-            // ==========================================
-            // 4. 独立模块 C：V3 动态曲率 Zap 引擎 (Ultimate Edition)
-            // ==========================================
-            if (allowZap) {
-                console.log("\n--- Module C: V3 Dynamic Curve Zap Engine ---");
-                
-                uint256 val0 = getTotalValueBase(finalBal0, 0, sqrtPriceX96, baseTokenIndex);
-                uint256 val1 = getTotalValueBase(0, finalBal1, sqrtPriceX96, baseTokenIndex);
-                uint256 walletTotalVal = val0 + val1;
+        // Zap 模块
+        if (allowZap) {
+             console.log("\n--- V3 Dynamic Curve Zap Engine ---");
+             uint256 val0 = getTotalValueBase(finalBal0, 0, sqrtPriceX96, baseTokenIndex);
+             uint256 val1 = getTotalValueBase(0, finalBal1, sqrtPriceX96, baseTokenIndex);
+             uint256 walletTotalVal = val0 + val1;
 
-                (uint256 req0, uint256 req1) = getAmountsForLiquidity(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, 1e18);
-                uint256 reqVal0 = getTotalValueBase(req0, 0, sqrtPriceX96, baseTokenIndex);
-                uint256 reqVal1 = getTotalValueBase(0, req1, sqrtPriceX96, baseTokenIndex);
-                uint256 reqTotalVal = reqVal0 + reqVal1;
+             (uint256 req0, uint256 req1) = getAmountsForLiquidity(sqrtPriceX96, sqrtPriceAX96, sqrtPriceBX96, 1e18);
+             uint256 reqVal0 = getTotalValueBase(req0, 0, sqrtPriceX96, baseTokenIndex);
+             uint256 reqVal1 = getTotalValueBase(0, req1, sqrtPriceX96, baseTokenIndex);
+             uint256 reqTotalVal = reqVal0 + reqVal1;
 
-                require(reqTotalVal > 0, "Invalid pool ratio");
-
+             if (reqTotalVal > 0) {
                 uint256 targetVal0 = (walletTotalVal * reqVal0) / reqTotalVal;
                 uint256 targetVal1 = (walletTotalVal * reqVal1) / reqTotalVal;
 
-                // 1. 算出“闪兑催化剂” (需要被 Swap 的偏差值，即钥匙)
                 bool is0Dominant = val0 > targetVal0;
                 uint256 excessVal = is0Dominant ? (val0 - targetVal0) : (val1 - targetVal1);
-
-                // 2. [数学魔法] 算出这笔催化剂能“撬动”的【全部真实闲置资金】(钥匙 + 宝藏)！
-                // 推导: 闲置总资金 = 偏差值 * (总比例 / 稀缺方比例)
                 uint256 totalIdleCapital = is0Dominant ? (excessVal * reqTotalVal) / reqVal1 : (excessVal * reqTotalVal) / reqVal0;
 
                 uint256 feeRateHalfX1e6 = fee / 2; 
-                uint256 expectedYieldRateX1e6 = (optimalThresholdBase * 1e6) / record.principalTotalBase;
-
-                console.log(string.concat("  -> Target Ratio     : ", is0Dominant ? sym0 : sym1, " needs to be swapped."));
-                console.log(string.concat("  -> Excess Catalyst  : ", formatDecimals(excessVal, decBase), " ", symBase));
-                console.log(string.concat("  -> Total Idle Cap.  : ", formatDecimals(totalIdleCapital, decBase), " ", symBase));
-
-                // 3. 计算绝对利润：全部闲置资金的预期收益 vs (Swap手续费 + 链上Gas)
+                uint256 expectedYieldRateX1e6;
+                if (record.principalTotalBase > 0) {
+                    expectedYieldRateX1e6 = (optimalThresholdBase * 1e6) / record.principalTotalBase;
+                } else if (walletTotalVal > 0) {
+                    // Empty-position fallback: preserve the original yield model,
+                    // but use current wallet capital as the temporary principal.
+                    uint256 fallbackThresholdBase = isAutoCalc
+                        ? Math.sqrt(2 * walletTotalVal * costCInBase)
+                        : optimalThresholdBase;
+                    expectedYieldRateX1e6 = (fallbackThresholdBase * 1e6) / walletTotalVal;
+                }
                 uint256 expectedGain = (totalIdleCapital * expectedYieldRateX1e6) / 1e6;
                 uint256 swapFeeCost = (excessVal * feeRateHalfX1e6) / 1e6;
                 uint256 zapGasCostBase = (tx.gasprice * 150000 * ethPriceInBase) / 1e18;
+                
+                console.log(string.concat(" -> Target Ratio     : ", is0Dominant ? sym0 : sym1, " needs to be swapped."));
+                console.log(string.concat(" -> Cycle Yield Rate : ", vm.toString(expectedYieldRateX1e6), " ppm"));
+                console.log(string.concat(" -> Swap Fee Hurdle  : ", vm.toString(feeRateHalfX1e6), " ppm"));
+                console.log(string.concat(" -> True Excess Cap. : ", formatDecimals(excessVal, decBase), " ", symBase));
+                console.log(string.concat(" -> Zap Gain vs Cost : ", formatDecimals(expectedGain, decBase), " vs ", formatDecimals(zapGasCostBase + swapFeeCost, decBase)));
 
-                console.log(string.concat("  -> Exp. Zap Gain    : ", formatDecimals(expectedGain, decBase), " ", symBase));
-                console.log(string.concat("  -> Est. Gas+Fee Cost: ", formatDecimals(zapGasCostBase + swapFeeCost, decBase), " ", symBase));
-
-                // 4. 终极判决：只要生息利润大于摩擦成本，立刻扣动扳机
                 if (expectedGain > (zapGasCostBase + swapFeeCost)) {
-                    console.log("  -> [ZAP APPROVED] Gain > Cost. Executing precision swap...");
-                    
+                    // console.log(" -> [Zap] Executing Precision Swap...");
                     if (is0Dominant) {
                         uint256 swapAmount0 = (finalBal0 * excessVal) / val0;
-                        console.log(string.concat("  -> Swapping ", sym0, " : ", formatDecimals(swapAmount0, dec0)));
-                        
-                        uint256 routerAllowance0 = IERC20Metadata(token0).allowance(owner, SWAP_ROUTER);
-                        if (routerAllowance0 < swapAmount0) {
-                            uint256 approveAmt = swapAmount0 * APPROVE_MULTIPLIER;
-                            IERC20Metadata(token0).approve(SWAP_ROUTER, approveAmt);
-                        }
-                        ISwapRouter(SWAP_ROUTER).exactInputSingle(
-                            ISwapRouter.ExactInputSingleParams({
-                                tokenIn: token0, tokenOut: token1, fee: fee, recipient: owner,
-                                deadline: block.timestamp + 1200, amountIn: swapAmount0, amountOutMinimum: 0, sqrtPriceLimitX96: 0
-                            })
-                        );
+                        if (IERC20Metadata(token0).allowance(owner, SWAP_ROUTER) < swapAmount0) IERC20Metadata(token0).approve(SWAP_ROUTER, type(uint256).max);
+                        ISwapRouter(SWAP_ROUTER).exactInputSingle(ISwapRouter.ExactInputSingleParams({
+                            tokenIn: token0, tokenOut: token1, fee: fee, recipient: owner,
+                            deadline: block.timestamp + 1200, amountIn: swapAmount0, amountOutMinimum: 0, sqrtPriceLimitX96: 0
+                        }));
                     } else {
                         uint256 swapAmount1 = (finalBal1 * excessVal) / val1;
-                        console.log(string.concat("  -> Swapping ", sym1, " : ", formatDecimals(swapAmount1, dec1)));
-                        
-                        uint256 routerAllowance1 = IERC20Metadata(token1).allowance(owner, SWAP_ROUTER);
-                        if (routerAllowance1 < swapAmount1) {
-                            uint256 approveAmt = swapAmount1 * APPROVE_MULTIPLIER;
-                            IERC20Metadata(token1).approve(SWAP_ROUTER, approveAmt);
-                        }
-                        ISwapRouter(SWAP_ROUTER).exactInputSingle(
-                            ISwapRouter.ExactInputSingleParams({
-                                tokenIn: token1, tokenOut: token0, fee: fee, recipient: owner,
-                                deadline: block.timestamp + 1200, amountIn: swapAmount1, amountOutMinimum: 0, sqrtPriceLimitX96: 0
-                            })
-                        );
+                        if (IERC20Metadata(token1).allowance(owner, SWAP_ROUTER) < swapAmount1) IERC20Metadata(token1).approve(SWAP_ROUTER, type(uint256).max);
+                        ISwapRouter(SWAP_ROUTER).exactInputSingle(ISwapRouter.ExactInputSingleParams({
+                            tokenIn: token1, tokenOut: token0, fee: fee, recipient: owner,
+                            deadline: block.timestamp + 1200, amountIn: swapAmount1, amountOutMinimum: 0, sqrtPriceLimitX96: 0
+                        }));
                     }
-                    
-                    // 刷新最新物理余额，此时已成完美配比
                     finalBal0 = IERC20Metadata(token0).balanceOf(owner);
                     finalBal1 = IERC20Metadata(token1).balanceOf(owner);
                 } else {
-                    console.log("  -> [BYPASS] Gain <= Cost. Mathematically unprofitable to Zap.");
+                    console.log(" -> [BYPASS] Gain < Cost. Mathematically unprofitable to Zap.");
                 }
-            }
+             }
+        }
 
-            // [执行复投]
-            uint256 allowance0 = IERC20Metadata(token0).allowance(owner, POSITION_MANAGER);
-            uint256 allowance1 = IERC20Metadata(token1).allowance(owner, POSITION_MANAGER);
-
-            if (allowance0 < finalBal0 && finalBal0 > 0) {
-                IERC20Metadata(token0).approve(POSITION_MANAGER, finalBal0 * APPROVE_MULTIPLIER);
-            }
-            if (allowance1 < finalBal1 && finalBal1 > 0) {
-                IERC20Metadata(token1).approve(POSITION_MANAGER, finalBal1 * APPROVE_MULTIPLIER);
-            }
+        // 2.4 Final Inject
+        if (finalBal0 > 0 && finalBal1 > 0) { 
+            if (IERC20Metadata(token0).allowance(owner, POSITION_MANAGER) < finalBal0) IERC20Metadata(token0).approve(POSITION_MANAGER, type(uint256).max);
+            if (IERC20Metadata(token1).allowance(owner, POSITION_MANAGER) < finalBal1) IERC20Metadata(token1).approve(POSITION_MANAGER, type(uint256).max);
 
             IMinimalPositionManager.IncreaseLiquidityParams memory incParams = IMinimalPositionManager.IncreaseLiquidityParams({
                 tokenId: tokenId,
@@ -447,7 +504,6 @@ contract AutoCompound is Script {
                 amount0Min: 0, amount1Min: 0,
                 deadline: block.timestamp + 180 
             });
-
             (uint128 addedLiquidity, uint256 used0, uint256 used1) = manager.increaseLiquidity(incParams);
             
             uint256 totalUsedBase = getTotalValueBase(used0, used1, sqrtPriceX96, baseTokenIndex);
@@ -457,8 +513,11 @@ contract AutoCompound is Script {
             console.log(string.concat("Invested Value : +", formatDecimals(totalUsedBase, decBase), " ", symBase));
             console.log(string.concat("Liquidity (L)  : +", vm.toString(addedLiquidity), " (Math Unit)"));
             console.log(string.concat("New Total Value: ", formatDecimals(newTotalBase, decBase), " ", symBase));
+        } else {
+            console.log("\n[SKIP] Final Check: One asset is 0. Cannot invest into In-Range position.");
+            if (finalBal0 == 0) console.log(string.concat(" -> ", sym0, " balance is 0"));
+            if (finalBal1 == 0) console.log(string.concat(" -> ", sym1, " balance is 0"));
         }
-
         vm.stopBroadcast();
         console.log("====================================================");
     }
