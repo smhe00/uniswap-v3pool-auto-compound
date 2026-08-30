@@ -69,6 +69,7 @@ library Math {
 contract AutoCompound is Script {
     uint256 constant APPROVE_MULTIPLIER = 28;
     uint256 constant MAX_BASE_FEE_WEI = 2 * 1e8; 
+    uint256 constant MAX_ZAP_SLIPPAGE_BPS = 5; // 0.05%
 
     address constant POSITION_MANAGER = 0xC36442b4a4522E871399CD717aBDD847Ab11FE88;
     address constant FACTORY = 0x1F98431c8aD98523631AE4a59f267346ea31F984;
@@ -109,6 +110,14 @@ contract AutoCompound is Script {
     function getTotalValueBase(uint256 amt0, uint256 amt1, uint160 sqrtRatioX96, uint8 baseIdx) internal pure returns (uint256) {
         if (baseIdx == 0) return amt0 + getValueOf1In0(amt1, sqrtRatioX96);
         else return getValueOf0In1(amt0, sqrtRatioX96) + amt1;
+    }
+
+    function getMinZapAmountOut(uint256 amountIn, uint160 sqrtRatioX96, bool zeroForOne, uint24 fee) internal pure returns (uint256) {
+        uint256 spotAmountOut = zeroForOne
+            ? getValueOf0In1(amountIn, sqrtRatioX96)
+            : getValueOf1In0(amountIn, sqrtRatioX96);
+        uint256 feeAdjustedOut = (spotAmountOut * (1_000_000 - uint256(fee))) / 1_000_000;
+        return (feeAdjustedOut * (10_000 - MAX_ZAP_SLIPPAGE_BPS)) / 10_000;
     }
 
     function getSqrtRatioAtTick(int24 tick) internal pure returns (uint160 sqrtPriceX96) {
@@ -475,14 +484,14 @@ contract AutoCompound is Script {
                         if (IERC20Metadata(token0).allowance(owner, SWAP_ROUTER) < swapAmount0) IERC20Metadata(token0).approve(SWAP_ROUTER, type(uint256).max);
                         ISwapRouter(SWAP_ROUTER).exactInputSingle(ISwapRouter.ExactInputSingleParams({
                             tokenIn: token0, tokenOut: token1, fee: fee, recipient: owner,
-                            deadline: block.timestamp + 1200, amountIn: swapAmount0, amountOutMinimum: 0, sqrtPriceLimitX96: 0
+                            deadline: block.timestamp + 1200, amountIn: swapAmount0, amountOutMinimum: getMinZapAmountOut(swapAmount0, sqrtPriceX96, true, fee), sqrtPriceLimitX96: 0
                         }));
                     } else {
                         uint256 swapAmount1 = (finalBal1 * excessVal) / val1;
                         if (IERC20Metadata(token1).allowance(owner, SWAP_ROUTER) < swapAmount1) IERC20Metadata(token1).approve(SWAP_ROUTER, type(uint256).max);
                         ISwapRouter(SWAP_ROUTER).exactInputSingle(ISwapRouter.ExactInputSingleParams({
                             tokenIn: token1, tokenOut: token0, fee: fee, recipient: owner,
-                            deadline: block.timestamp + 1200, amountIn: swapAmount1, amountOutMinimum: 0, sqrtPriceLimitX96: 0
+                            deadline: block.timestamp + 1200, amountIn: swapAmount1, amountOutMinimum: getMinZapAmountOut(swapAmount1, sqrtPriceX96, false, fee), sqrtPriceLimitX96: 0
                         }));
                     }
                     finalBal0 = IERC20Metadata(token0).balanceOf(owner);
